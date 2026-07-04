@@ -4940,3 +4940,80 @@ class TestHighlightPageMapping:
             assert result["highlights"] == ["Orphaned highlight"]
         finally:
             zpath.unlink(missing_ok=True)
+
+
+# =============================================================================
+# Legacy redirectionPageMap merged rendering (bridge handoff 023)
+# =============================================================================
+
+
+class TestLegacyRedirectionPageMap:
+    """Documents with no cPages schema carry a flat redirectionPageMap instead.
+
+    render_merged_page_from_document_zip previously only consulted cPages'
+    per-page redir.value, so any legacy-schema PDF (real device data: "The
+    Wynn Briefing" test specimen from handoff 023) always fell through to the
+    "no PDF underlay (user-added page)" annotation-only branch, even though
+    the PDF underlay was right there and the page had a real redirect.
+    """
+
+    def _legacy_pdf_zip(self, *, redirection_map, pdf_pages=1):
+        doc_id = "doc-legacy-redir"
+        page_id = "page-a"
+        rm_bytes = _make_v6_rm_bytes()
+        pdf_bytes = _make_synthetic_pdf(pdf_pages)
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
+            zpath = Path(ztmp.name)
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr(
+                f"{doc_id}.content",
+                json.dumps(
+                    {
+                        "fileType": "pdf",
+                        "pages": [page_id],
+                        "redirectionPageMap": redirection_map,
+                    }
+                ),
+            )
+            zf.writestr(f"{doc_id}.metadata", json.dumps({"visibleName": "test"}))
+            zf.writestr(f"{doc_id}.pdf", pdf_bytes)
+            zf.writestr(f"{doc_id}/{page_id}.rm", rm_bytes)
+        return zpath
+
+    def test_legacy_redirection_map_resolves_pdf_underlay(self):
+        """redirectionPageMap=[0] must composite the PDF, not fall back to annotation-only."""
+        from remarkable_mcp.extract import render_merged_page_from_document_zip
+
+        zpath = self._legacy_pdf_zip(redirection_map=[0])
+        try:
+            png, note = render_merged_page_from_document_zip(zpath, page=1)
+            assert png is not None
+            assert note is None, f"expected a clean merged render, got fallback note: {note!r}"
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def test_legacy_redirection_map_negative_one_is_annotation_only(self):
+        """A -1 entry (genuine user-added blank page) still falls back correctly."""
+        from remarkable_mcp.extract import render_merged_page_from_document_zip
+
+        zpath = self._legacy_pdf_zip(redirection_map=[-1])
+        try:
+            png, note = render_merged_page_from_document_zip(zpath, page=1)
+            assert png is not None
+            assert note is not None and "no PDF underlay" in note
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def test_read_legacy_redirection_page_map_ignores_cpages_documents(self):
+        """cPages-schema documents don't have (and don't need) this fallback."""
+        import tempfile as _tempfile
+
+        from remarkable_mcp.extract import _read_legacy_redirection_page_map
+
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            (tmpdir_path / "doc.content").write_text(
+                json.dumps({"cPages": {"pages": [{"id": "p1"}]}})
+            )
+            assert _read_legacy_redirection_page_map(tmpdir_path) == []

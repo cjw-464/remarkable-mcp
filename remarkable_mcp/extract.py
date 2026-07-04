@@ -1278,6 +1278,29 @@ def _pdf_page_index_for_cpages_entry(entry: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _read_legacy_redirection_page_map(tmpdir_path: Path) -> List[int]:
+    """Read the legacy ``.content`` ``redirectionPageMap`` array.
+
+    Older documents (no ``cPages`` schema) carry a flat ``pages`` UUID list
+    plus a parallel ``redirectionPageMap``: index i is the reMarkable page,
+    the value is the 0-based PDF page it corresponds to, or ``-1`` for a
+    page with no PDF underlay (e.g. a user-inserted blank page). Returns []
+    if the document has no such array (including cPages-schema documents,
+    which don't need this fallback).
+    """
+    content_file = next(tmpdir_path.glob("*.content"), None)
+    if content_file is None:
+        return []
+    try:
+        data = json.loads(content_file.read_text())
+        page_map = data.get("redirectionPageMap")
+        if isinstance(page_map, list) and all(isinstance(v, int) for v in page_map):
+            return page_map
+    except Exception:
+        pass
+    return []
+
+
 def _render_pdf_page_to_png(
     pdf_bytes: bytes, page_index: int, width: int, height: int
 ) -> Optional[bytes]:
@@ -1436,6 +1459,15 @@ def render_merged_page_from_document_zip(
         pdf_page_index: Optional[int] = None
         if cpages and page <= len(cpages):
             pdf_page_index = _pdf_page_index_for_cpages_entry(cpages[page - 1])
+        elif not cpages:
+            # Legacy documents (no cPages schema) carry a flat redirectionPageMap
+            # instead - same semantics (0-based PDF page index per rm page, -1
+            # for a page with no PDF underlay), just not nested under cPages.
+            redirection_map = _read_legacy_redirection_page_map(tmpdir_path)
+            if redirection_map and page <= len(redirection_map):
+                mapped = redirection_map[page - 1]
+                if mapped >= 0:
+                    pdf_page_index = mapped
 
         if pdf_page_index is None:
             # No redirect — this page may be a user-added blank page
