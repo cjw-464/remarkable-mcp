@@ -1726,14 +1726,21 @@ def extract_text_from_document_zip(
                 # Malformed JSON or read error - skip this file
                 pass
 
-        # Extract PDF highlights
+        # Extract PDF highlights. Smart highlights live in per-page sidecar
+        # blobs named "{pageId}.json"; the pageId is the filename stem, which
+        # maps to a page number via the same page_order resolved above.
         for json_file in tmpdir_path.glob("**/*.json"):
             try:
                 data = json.loads(json_file.read_text())
                 if isinstance(data, dict) and "highlights" in data:
+                    page_id = json_file.stem
+                    page_num = page_order.index(page_id) + 1 if page_id in page_order else None
                     for h in data.get("highlights", []):
                         if "text" in h and h["text"]:
-                            result["highlights"].append(h["text"])
+                            text = h["text"]
+                            result["highlights"].append(
+                                f"[Page {page_num}] {text}" if page_num else text
+                            )
             except Exception:
                 # Malformed JSON - skip this file
                 pass

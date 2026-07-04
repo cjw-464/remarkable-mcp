@@ -12,7 +12,7 @@ import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.types import (
@@ -171,12 +171,36 @@ def _is_cloud_archived(item) -> bool:
 
 
 def _item_all_tags(item) -> List[str]:
-    """Doc-level tags plus page-level tags, since reMarkable users tag either."""
+    """Doc-level tag names plus page-level tag names, for tag-filter matching."""
     raw_tags = getattr(item, "tags", None)
     tags = list(raw_tags) if isinstance(raw_tags, list) else []
     raw_page_tags = getattr(item, "page_tags", None)
-    page_tags = list(raw_page_tags) if isinstance(raw_page_tags, list) else []
-    return tags + [t for t in page_tags if t not in tags]
+    page_tag_names = (
+        [
+            t["name"] if isinstance(t, dict) else t
+            for t in raw_page_tags
+            if (t.get("name") if isinstance(t, dict) else t)
+        ]
+        if isinstance(raw_page_tags, list)
+        else []
+    )
+    return tags + [t for t in page_tag_names if t not in tags]
+
+
+def _item_tag_fields(item) -> Dict[str, Any]:
+    """Doc-level tags and page-level tags (with page numbers) for display.
+
+    Kept distinct from doc-level tags per the tag data model: a page tag
+    knows which page it lives on, a doc tag doesn't.
+    """
+    fields: Dict[str, Any] = {}
+    raw_tags = getattr(item, "tags", None)
+    if isinstance(raw_tags, list) and raw_tags:
+        fields["tags"] = raw_tags
+    raw_page_tags = getattr(item, "page_tags", None)
+    if isinstance(raw_page_tags, list) and raw_page_tags:
+        fields["page_tags"] = raw_page_tags
+    return fields
 
 
 def _modified_sort_key(item) -> float:
@@ -623,6 +647,7 @@ async def remarkable_read(
                     target_doc.ModifiedClient if hasattr(target_doc, "ModifiedClient") else None
                 ),
             }
+            result.update(_item_tag_fields(target_doc))
 
             # Add OCR backend info if OCR was used
             if include_ocr and ocr_backend_used:
@@ -726,6 +751,7 @@ async def remarkable_read(
                     target_doc.ModifiedClient if hasattr(target_doc, "ModifiedClient") else None
                 ),
             }
+            result.update(_item_tag_fields(target_doc))
             hint = (
                 f"Document '{target_doc.VissibleName}' has no extractable text content. "
                 "This may be a handwritten notebook - try include_ocr=True for OCR extraction."
@@ -764,6 +790,9 @@ async def remarkable_read(
         tags = getattr(target_doc, "tags", None) or (content.get("tags") if content else None)
         if tags:
             result["tags"] = tags
+        page_tags = getattr(target_doc, "page_tags", None)
+        if page_tags:
+            result["page_tags"] = page_tags
 
         if has_more:
             result["next_page"] = page + 1
@@ -879,10 +908,8 @@ async def remarkable_browse(
                             item.ModifiedClient if hasattr(item, "ModifiedClient") else None
                         ),
                     }
-                    # Add tags if present
-                    all_tags = _item_all_tags(item)
-                    if all_tags:
-                        match_info["tags"] = all_tags
+                    # Add tags if present (doc-level and page-level, distinct)
+                    match_info.update(_item_tag_fields(item))
                     matches.append(match_info)
 
             matches.sort(key=lambda x: x["name"])
@@ -1016,10 +1043,8 @@ async def remarkable_browse(
                     "id": item.ID,
                     "modified": (item.ModifiedClient if hasattr(item, "ModifiedClient") else None),
                 }
-                # Add tags if present
-                all_tags = _item_all_tags(item)
-                if all_tags:
-                    doc_info["tags"] = all_tags
+                # Add tags if present (doc-level and page-level, distinct)
+                doc_info.update(_item_tag_fields(item))
                 documents.append(doc_info)
 
         result = {"mode": "browse", "path": path, "folders": folders, "documents": documents}
@@ -1101,10 +1126,8 @@ async def remarkable_recent(limit: int = 10, include_preview: bool = False) -> s
                 "path": _apply_root_filter(doc_path),
                 "modified": (doc.ModifiedClient if hasattr(doc, "ModifiedClient") else None),
             }
-            # Add tags if present
-            all_tags = _item_all_tags(doc)
-            if all_tags:
-                doc_info["tags"] = all_tags
+            # Add tags if present (doc-level and page-level, distinct)
+            doc_info.update(_item_tag_fields(doc))
 
             if include_preview:
                 # Download and extract preview (skip notebooks - they need slow OCR)

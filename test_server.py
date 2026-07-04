@@ -4787,3 +4787,156 @@ class TestGetDocumentFileType:
             assert get_document_file_type(zpath) == ""
         finally:
             zpath.unlink(missing_ok=True)
+
+
+# =============================================================================
+# Page-aware tags + cloud highlights (bridge handoff 020)
+# =============================================================================
+
+
+class TestPageTagPageNumbers:
+    """Page tags carry a pageId; it must resolve to a 1-based page number."""
+
+    def test_resolves_page_number_for_notebook_cpages(self):
+        """cPages.pages schema (native notebooks): pageId -> its index + 1."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        content = {
+            "cPages": {
+                "pages": [
+                    {"id": "page-a"},
+                    {"id": "page-b"},
+                    {"id": "page-c"},
+                ]
+            }
+        }
+        order = RemarkableClient._page_order_from_content(content)
+        assert order == ["page-a", "page-b", "page-c"]
+
+    def test_skips_deleted_cpages_entries(self):
+        """Deleted pages don't occupy a visible page slot."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        content = {
+            "cPages": {
+                "pages": [
+                    {"id": "page-a"},
+                    {"id": "page-b", "deleted": True},
+                    {"id": "page-c"},
+                ]
+            }
+        }
+        order = RemarkableClient._page_order_from_content(content)
+        assert order == ["page-a", "page-c"]
+
+    def test_resolves_page_number_for_legacy_pdf_pages(self):
+        """Legacy flat pages list (PDF/EPUB-backed documents)."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        content = {"pages": ["only-page"]}
+        order = RemarkableClient._page_order_from_content(content)
+        assert order == ["only-page"]
+
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_load_document_builds_page_tags_with_page_numbers(self, mock_request):
+        """_load_document must carry {"name", "page"} entries, not bare names."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        doc_id = "doc-123"
+        doc_hash = "doc-hash"
+        content_hash = "content-hash"
+        metadata_hash = "metadata-hash"
+
+        index_bytes = (
+            f"3\n{content_hash}:0:{doc_id}.content:0:1\n{metadata_hash}:0:{doc_id}.metadata:0:1\n"
+        ).encode("utf-8")
+
+        content_json = json.dumps(
+            {
+                "cPages": {"pages": [{"id": "p1"}, {"id": "p2"}, {"id": "p3"}]},
+                "pageTags": [{"name": "idea", "pageId": "p3", "timestamp": 1}],
+            }
+        ).encode("utf-8")
+        metadata_json = json.dumps(
+            {"visibleName": "Tagged Notebook", "type": "DocumentType"}
+        ).encode("utf-8")
+
+        blob_by_hash = {
+            doc_hash: index_bytes,
+            content_hash: content_json,
+            metadata_hash: metadata_json,
+        }
+
+        def fake_request(method, url, **kwargs):
+            response = Mock()
+            response.status_code = 200
+            response.content = blob_by_hash[url.rsplit("/", 1)[-1]]
+            response.raise_for_status = Mock()
+            return response
+
+        mock_request.side_effect = fake_request
+
+        client = RemarkableClient(user_token="user-token")
+        doc = client._load_document({"id": doc_id, "hash": doc_hash, "size": 2})
+
+        assert doc.page_tags == [{"name": "idea", "page": 3}]
+
+    def test_load_document_omits_page_when_pageid_unresolvable(self):
+        """A pageId that no longer exists in the page order gets no 'page' key."""
+        from remarkable_mcp.sync import RemarkableClient
+
+        client = RemarkableClient(user_token="user-token")
+        content = {
+            "cPages": {"pages": [{"id": "p1"}]},
+            "pageTags": [{"name": "idea", "pageId": "gone", "timestamp": 1}],
+        }
+        page_order = client._page_order_from_content(content)
+        assert "gone" not in page_order
+
+
+class TestHighlightPageMapping:
+    """Cloud highlight sidecar text carries its page number (bridge handoff 020)."""
+
+    def _zip_with_highlight(self, *, page_id, pages, highlight_text):
+        import tempfile
+        import zipfile as _zip
+        from pathlib import Path
+
+        doc_id = "doc-highlight-test"
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
+            zpath = Path(ztmp.name)
+        with _zip.ZipFile(zpath, "w") as zf:
+            zf.writestr(
+                f"{doc_id}.content",
+                json.dumps({"pages": pages, "fileType": "pdf"}),
+            )
+            zf.writestr(f"{doc_id}.metadata", json.dumps({"visibleName": "test"}))
+            zf.writestr(
+                f"{doc_id}.highlights/{page_id}.json",
+                json.dumps({"highlights": [{"text": highlight_text}]}),
+            )
+        return zpath
+
+    def test_highlight_text_prefixed_with_resolved_page_number(self):
+        from remarkable_mcp.extract import extract_text_from_document_zip
+
+        zpath = self._zip_with_highlight(
+            page_id="page-2", pages=["page-1", "page-2"], highlight_text="Creativity is currency"
+        )
+        try:
+            result = extract_text_from_document_zip(zpath)
+            assert result["highlights"] == ["[Page 2] Creativity is currency"]
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def test_highlight_text_unprefixed_when_page_unresolvable(self):
+        from remarkable_mcp.extract import extract_text_from_document_zip
+
+        zpath = self._zip_with_highlight(
+            page_id="unknown-page", pages=["page-1"], highlight_text="Orphaned highlight"
+        )
+        try:
+            result = extract_text_from_document_zip(zpath)
+            assert result["highlights"] == ["Orphaned highlight"]
+        finally:
+            zpath.unlink(missing_ok=True)

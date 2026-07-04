@@ -338,7 +338,10 @@ class Document:
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
-    page_tags: List[str] = field(default_factory=list)
+    # Each entry is {"name": str, "page": Optional[int]} - "page" is the
+    # 1-based position in the document's visible page order, omitted when the
+    # tagged page can't be resolved (e.g. page since deleted).
+    page_tags: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_folder(self) -> bool:
@@ -576,6 +579,27 @@ class RemarkableClient:
 
         return documents
 
+    @staticmethod
+    def _page_order_from_content(content: Dict[str, Any]) -> List[str]:
+        """Return visible page ids in order from a parsed ``.content`` blob.
+
+        Handles the modern ``cPages.pages[].id`` schema (native notebooks),
+        skipping entries marked ``deleted`` since those don't occupy a visible
+        page slot, and the legacy flat ``pages`` UUID list (PDF/EPUB-backed
+        documents, which have no delete markers).
+        """
+        cpages = content.get("cPages")
+        if isinstance(cpages, dict) and isinstance(cpages.get("pages"), list):
+            return [
+                p["id"]
+                for p in cpages["pages"]
+                if isinstance(p, dict) and p.get("id") and not p.get("deleted")
+            ]
+        pages = content.get("pages")
+        if isinstance(pages, list) and all(isinstance(p, str) for p in pages):
+            return list(pages)
+        return []
+
     def _load_document(self, entry: Dict[str, Any]) -> Optional[Document]:
         """Load a single document's metadata from its index entry.
 
@@ -622,7 +646,19 @@ class RemarkableClient:
             return [t["name"] if isinstance(t, dict) else t for t in raw_tags]
 
         tags = _tag_names(content.get("tags", []))
-        page_tags = _tag_names(content.get("pageTags", []))
+
+        # Page tags carry a pageId pointing at a specific page; resolve it to a
+        # 1-based page number via the document's visible page order so a tag
+        # can be routed straight to remarkable_image(doc, page=N).
+        page_order = self._page_order_from_content(content)
+        page_tags: List[Dict[str, Any]] = []
+        for raw_tag in content.get("pageTags", []):
+            name = raw_tag["name"] if isinstance(raw_tag, dict) else raw_tag
+            page_id = raw_tag.get("pageId") if isinstance(raw_tag, dict) else None
+            tag_entry: Dict[str, Any] = {"name": name}
+            if page_id and page_id in page_order:
+                tag_entry["page"] = page_order.index(page_id) + 1
+            page_tags.append(tag_entry)
 
         # Parse last modified timestamp
         last_modified = None
