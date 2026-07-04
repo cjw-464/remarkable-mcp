@@ -338,6 +338,7 @@ class Document:
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    page_tags: List[str] = field(default_factory=list)
 
     @property
     def is_folder(self) -> bool:
@@ -593,6 +594,7 @@ class RemarkableClient:
 
         # Find and fetch the metadata file
         metadata: Dict[str, Any] = {}
+        content: Dict[str, Any] = {}
         files = []
 
         for blob_entry in blob_entries:
@@ -603,10 +605,24 @@ class RemarkableClient:
                     metadata = json.loads(meta_content.decode("utf-8"))
                 except Exception:
                     pass
+            elif blob_entry["id"].endswith(".content"):
+                try:
+                    doc_content = self._get_file(blob_entry["hash"], blob_entry["id"])
+                    content = json.loads(doc_content.decode("utf-8"))
+                except Exception:
+                    pass
 
         # Skip deleted documents
         if metadata.get("deleted", False):
             return None
+
+        # Tags live in the .content blob, not .metadata. Modern firmware stores
+        # each tag as a {"name", "timestamp"} dict rather than a bare string.
+        def _tag_names(raw_tags: List[Any]) -> List[str]:
+            return [t["name"] if isinstance(t, dict) else t for t in raw_tags]
+
+        tags = _tag_names(content.get("tags", []))
+        page_tags = _tag_names(content.get("pageTags", []))
 
         # Parse last modified timestamp
         last_modified = None
@@ -628,7 +644,8 @@ class RemarkableClient:
             last_modified=last_modified,
             size=entry["size"],
             files=files,
-            tags=metadata.get("tags", []),
+            tags=tags,
+            page_tags=page_tags,
         )
 
     def get_doc(self, doc_id: str) -> Optional[Document]:

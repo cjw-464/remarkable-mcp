@@ -170,6 +170,15 @@ def _is_cloud_archived(item) -> bool:
     return parent == "trash"
 
 
+def _item_all_tags(item) -> List[str]:
+    """Doc-level tags plus page-level tags, since reMarkable users tag either."""
+    raw_tags = getattr(item, "tags", None)
+    tags = list(raw_tags) if isinstance(raw_tags, list) else []
+    raw_page_tags = getattr(item, "page_tags", None)
+    page_tags = list(raw_page_tags) if isinstance(raw_page_tags, list) else []
+    return tags + [t for t in page_tags if t not in tags]
+
+
 def _modified_sort_key(item) -> float:
     """Return a sortable timestamp for an item's modified date.
 
@@ -856,11 +865,9 @@ async def remarkable_browse(
                 # Filter by root path
                 if not _is_within_root(item_path, root):
                     continue
-                # Filter by tags if provided
+                # Filter by tags if provided (doc-level and page-level both count)
                 if tags:
-                    item_tags_lower = [
-                        t.lower() for t in (item.tags if hasattr(item, "tags") else [])
-                    ]
+                    item_tags_lower = [t.lower() for t in _item_all_tags(item)]
                     if not any(tag.lower() in item_tags_lower for tag in tags):
                         continue
                 if query_lower in item.VissibleName.lower():
@@ -873,8 +880,9 @@ async def remarkable_browse(
                         ),
                     }
                     # Add tags if present
-                    if hasattr(item, "tags") and item.tags:
-                        match_info["tags"] = item.tags
+                    all_tags = _item_all_tags(item)
+                    if all_tags:
+                        match_info["tags"] = all_tags
                     matches.append(match_info)
 
             matches.sort(key=lambda x: x["name"])
@@ -995,9 +1003,9 @@ async def remarkable_browse(
             # Skip cloud-archived items
             if _is_cloud_archived(item):
                 continue
-            # Filter by tags if provided
+            # Filter by tags if provided (doc-level and page-level both count)
             if tags and not item.is_folder:
-                item_tags_lower = [t.lower() for t in (item.tags if hasattr(item, "tags") else [])]
+                item_tags_lower = [t.lower() for t in _item_all_tags(item)]
                 if not any(tag.lower() in item_tags_lower for tag in tags):
                     continue
             if item.is_folder:
@@ -1009,8 +1017,9 @@ async def remarkable_browse(
                     "modified": (item.ModifiedClient if hasattr(item, "ModifiedClient") else None),
                 }
                 # Add tags if present
-                if hasattr(item, "tags") and item.tags:
-                    doc_info["tags"] = item.tags
+                all_tags = _item_all_tags(item)
+                if all_tags:
+                    doc_info["tags"] = all_tags
                 documents.append(doc_info)
 
         result = {"mode": "browse", "path": path, "folders": folders, "documents": documents}
@@ -1093,8 +1102,9 @@ async def remarkable_recent(limit: int = 10, include_preview: bool = False) -> s
                 "modified": (doc.ModifiedClient if hasattr(doc, "ModifiedClient") else None),
             }
             # Add tags if present
-            if hasattr(doc, "tags") and doc.tags:
-                doc_info["tags"] = doc.tags
+            all_tags = _item_all_tags(doc)
+            if all_tags:
+                doc_info["tags"] = all_tags
 
             if include_preview:
                 # Download and extract preview (skip notebooks - they need slow OCR)
