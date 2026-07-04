@@ -2888,6 +2888,93 @@ class TestWriteTools:
                     mcp._tool_manager._tools.pop(name, None)
 
     @pytest.mark.asyncio
+    async def test_upload_passes_tags_to_cloud_client(self):
+        """Upload-time tags (bridge handoff 021) reach upload_document and the response."""
+        import tempfile
+
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env.pop("REMARKABLE_READ_ONLY", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(b"%PDF-1.4 test")
+                pdf_path = tmp.name
+            try:
+                mock_doc = Mock(spec=["id", "tags"])
+                mock_doc.id = "new-doc-id"
+                mock_doc.tags = ["briefing"]
+                mock_client = Mock(spec=["get_meta_items", "upload_document"])
+                mock_client.get_meta_items.return_value = []
+                mock_client.upload_document.return_value = mock_doc
+
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client):
+                    result = await mcp.call_tool(
+                        "remarkable_upload",
+                        {
+                            "file_path": pdf_path,
+                            "document_name": "My Doc",
+                            "tags": ["briefing"],
+                        },
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["uploaded"] is True
+                assert data["tags"] == ["briefing"]
+                mock_client.upload_document.assert_called_once()
+                assert mock_client.upload_document.call_args.kwargs["tags"] == ["briefing"]
+            finally:
+                os.unlink(pdf_path)
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_upload_tags_ignored_note_on_usb_web(self):
+        """USB web transport can't set tags at upload time; must say so, not drop silently."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env["REMARKABLE_USE_USB_WEB"] = "1"
+        env.pop("REMARKABLE_READ_ONLY", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(b"%PDF-1.4 test")
+                pdf_path = tmp.name
+            try:
+                mock_client = Mock(spec=["get_meta_items", "_documents", "_documents_by_id"])
+                with (
+                    patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client),
+                    patch("remarkable_mcp.write_tools._upload_via_usb_web"),
+                ):
+                    result = await mcp.call_tool(
+                        "remarkable_upload",
+                        {"file_path": pdf_path, "tags": ["briefing"]},
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["uploaded"] is True
+                assert "tags" in data.get("note", "").lower()
+            finally:
+                os.unlink(pdf_path)
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
     async def test_mkdir_not_registered_in_usb_web_mode(self):
         """SSH-only write tools must not be exposed in USB web mode (upload-only)."""
         from remarkable_mcp.write_tools import register_write_tools
@@ -5017,3 +5104,62 @@ class TestLegacyRedirectionPageMap:
                 json.dumps({"cPages": {"pages": [{"id": "p1"}]}})
             )
             assert _read_legacy_redirection_page_map(tmpdir_path) == []
+
+
+# =============================================================================
+# Upload-time tags (bridge handoff 021)
+# =============================================================================
+
+
+class TestUploadDocumentTags:
+    """upload_document must write doc-level tags into the new .content blob."""
+
+    def _client_capturing_content(self):
+        """A RemarkableClient with blob/index/root-sync internals stubbed out.
+
+        Captures the JSON bytes written to the `.content` blob so the test can
+        assert on the exact shape without any network I/O.
+        """
+        from remarkable_mcp.sync import RemarkableClient
+
+        client = RemarkableClient(user_token="user-token")
+        captured = {}
+
+        def fake_upload_file_blob(content: bytes, filename: str):
+            if filename.endswith(".content"):
+                captured["content"] = json.loads(content.decode("utf-8"))
+            return {"hash": "fake-hash", "id": filename}
+
+        client._upload_file_blob = fake_upload_file_blob
+        client._upload_doc_index = lambda doc_id, files: {"hash": "doc-hash", "id": doc_id}
+        client._sync_root = lambda mutate: None
+        return client, captured
+
+    def test_upload_with_tags_writes_name_and_timestamp_dicts(self):
+        """Tags must be written as {"name", "timestamp"} dicts, matching real
+        device data (bridge handoff 019/020 confirmed this shape on read)."""
+        client, captured = self._client_capturing_content()
+
+        doc = client.upload_document(b"%PDF-1.4 fake", "Briefing", "pdf", tags=["briefing"])
+
+        assert captured["content"]["tags"] == [
+            {"name": "briefing", "timestamp": captured["content"]["tags"][0]["timestamp"]}
+        ]
+        assert isinstance(captured["content"]["tags"][0]["timestamp"], int)
+        assert doc.tags == ["briefing"]
+
+    def test_upload_without_tags_writes_empty_list(self):
+        """No tags argument -> unchanged behavior: an empty tags array."""
+        client, captured = self._client_capturing_content()
+
+        doc = client.upload_document(b"%PDF-1.4 fake", "Untagged", "pdf")
+
+        assert captured["content"]["tags"] == []
+        assert doc.tags == []
+
+    def test_upload_with_multiple_tags_preserves_order(self):
+        client, captured = self._client_capturing_content()
+
+        client.upload_document(b"%PDF-1.4 fake", "Multi", "pdf", tags=["briefing", "review"])
+
+        assert [t["name"] for t in captured["content"]["tags"]] == ["briefing", "review"]

@@ -25,7 +25,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Optional
+from typing import List, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
@@ -925,13 +925,14 @@ def register_write_tools():
         file_path: str,
         parent_folder: str = "/",
         document_name: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> str:
         """
         <usecase>Upload a PDF or EPUB file to the reMarkable tablet.</usecase>
         <instructions>
         Uploads a local file to the tablet. Only PDF and EPUB formats
         are supported. Works in all three transports:
-        - Cloud: uploaded via the sync protocol; supports parent_folder + document_name
+        - Cloud: uploaded via the sync protocol; supports parent_folder + document_name + tags
         - SSH: transferred over SSH, metadata created; supports parent_folder + document_name
         - USB web: uploaded via POST /upload; lands at the root (the firmware's
           upload endpoint has no folder or rename field)
@@ -944,11 +945,16 @@ def register_write_tools():
           Honored in cloud and SSH modes; ignored by the USB web interface.
         - document_name: Display name on tablet (default: filename without
           extension). Honored in cloud and SSH modes; ignored by the USB web interface.
+        - tags: Doc-level tags to set at upload time (optional). Cloud mode only -
+          the document arrives on-device pre-tagged, so a routing rule can
+          filter on it with zero on-device action. Not yet supported for
+          SSH/USB-web uploads.
         </parameters>
         <examples>
         - remarkable_upload("/tmp/paper.pdf")
         - remarkable_upload("/tmp/book.epub", parent_folder="/Books")
         - remarkable_upload("/tmp/report.pdf", document_name="Q4 Report")
+        - remarkable_upload("/tmp/briefing.pdf", parent_folder="/Briefings", tags=["briefing"])
         </examples>
         """
 
@@ -992,16 +998,20 @@ def register_write_tools():
                     name = document_name or os.path.splitext(os.path.basename(file_path))[0]
                     with open(file_path, "rb") as f:
                         data = f.read()
-                    doc = client.upload_document(data, name, ext, parent_id)
+                    doc = client.upload_document(data, name, ext, parent_id, tags=tags)
+                    result = {
+                        "uploaded": True,
+                        "name": name,
+                        "uuid": doc.id,
+                        "format": ext,
+                        "parent_folder": parent_folder,
+                        "transport": "cloud",
+                    }
+                    doc_tags = getattr(doc, "tags", None)
+                    if isinstance(doc_tags, list) and doc_tags:
+                        result["tags"] = doc_tags
                     return make_response(
-                        {
-                            "uploaded": True,
-                            "name": name,
-                            "uuid": doc.id,
-                            "format": ext,
-                            "parent_folder": parent_folder,
-                            "transport": "cloud",
-                        },
+                        result,
                         "Document uploaded to the reMarkable cloud. "
                         "Use remarkable_browse() to verify it appears.",
                     )
@@ -1023,11 +1033,19 @@ def register_write_tools():
                         "format": ext,
                         "transport": "usb-web",
                     }
+                    notes = []
                     if parent_folder != "/":
-                        result["note"] = (
+                        notes.append(
                             "USB web upload places files at root. "
                             "Use SSH mode for folder placement."
                         )
+                    if tags:
+                        notes.append(
+                            "USB web upload does not support tags; the 'tags' "
+                            "argument was ignored. Use cloud mode to tag at upload time."
+                        )
+                    if notes:
+                        result["note"] = " ".join(notes)
                     return make_response(
                         result,
                         "Document uploaded via USB web interface. "
@@ -1090,16 +1108,22 @@ def register_write_tools():
                 ssh_client._documents = []
                 ssh_client._documents_by_id = {}
 
+                ssh_result = {
+                    "uploaded": True,
+                    "name": name,
+                    "uuid": doc_uuid,
+                    "format": ext,
+                    "parent_folder": parent_folder,
+                    "remote_path": remote_file,
+                    "transport": "ssh",
+                }
+                if tags:
+                    ssh_result["note"] = (
+                        "SSH upload does not yet support tags; the 'tags' "
+                        "argument was ignored. Use cloud mode to tag at upload time."
+                    )
                 return make_response(
-                    {
-                        "uploaded": True,
-                        "name": name,
-                        "uuid": doc_uuid,
-                        "format": ext,
-                        "parent_folder": parent_folder,
-                        "remote_path": remote_file,
-                        "transport": "ssh",
-                    },
+                    ssh_result,
                     "Document uploaded successfully. Use remarkable_browse() to verify it appears.",
                 )
 

@@ -1073,12 +1073,19 @@ class RemarkableClient:
         name: str,
         file_type: str,
         parent_id: str = "",
+        tags: Optional[List[str]] = None,
     ) -> Document:
         """Upload a PDF or EPUB document to the cloud and return it.
 
         Builds the four blobs a reMarkable document needs (``.content``,
         ``.metadata``, ``.pagedata`` and the source ``.pdf``/``.epub``), then
         adds the document to the root index.
+
+        ``tags``, if given, are written as doc-level tags in ``.content`` -
+        the same ``{"name", "timestamp"}`` shape modern firmware writes for
+        on-device tagging (confirmed live via the read-side fix in bridge
+        handoff 019/020). Timestamp is a raw epoch-ms int, matching real
+        device data (not the ``_now_ms()`` string used for metadata fields).
         """
         ext = file_type.lower().lstrip(".")
         if ext not in ("pdf", "epub"):
@@ -1086,6 +1093,7 @@ class RemarkableClient:
 
         doc_id = str(uuid.uuid4())
         now = self._now_ms()
+        tag_entries = [{"name": t, "timestamp": int(time.time() * 1000)} for t in (tags or [])]
 
         page_count, page_uuids = self._page_layout(content, ext)
         content_json = {
@@ -1102,7 +1110,7 @@ class RemarkableClient:
             "pageCount": page_count,
             "pageTags": [],
             "pages": page_uuids,
-            "tags": [],
+            "tags": tag_entries,
             "textScale": 1,
         }
         metadata = {
@@ -1142,6 +1150,7 @@ class RemarkableClient:
             name=name,
             doc_type="DocumentType",
             parent=parent_id or "",
+            tags=[e["name"] for e in tag_entries],
         )
 
     @staticmethod
