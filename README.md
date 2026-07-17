@@ -237,13 +237,14 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | Tool | Description |
 |------|-------------|
 | `remarkable_read` | Read and extract text from documents (with pagination and search) |
+| `remarkable_highlights` | Get smart highlights from an EPUB/PDF, with page numbers |
 | `remarkable_browse` | Navigate folders, search by document name, or filter by tags |
 | `remarkable_search` | Search content across multiple documents (with tag filtering) |
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These seven tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 

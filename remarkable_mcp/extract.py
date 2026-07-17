@@ -307,6 +307,83 @@ def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
         return []
 
 
+def extract_highlights_from_rm_bytes(data: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract smart-highlight text from raw v6 .rm page bytes.
+
+    On current firmware, highlighting text in an EPUB/PDF stores a
+    ``SceneGlyphItemBlock`` whose ``GlyphRange`` value carries the extracted
+    text, color, and bounding rectangles - no sidecar ``.highlights`` JSON is
+    written. Returns ``[{"text": str, "color": str}]`` in document order.
+    """
+    try:
+        import io
+
+        from rmscene import read_blocks
+        from rmscene.scene_items import GlyphRange
+
+        highlights: List[Dict[str, Any]] = []
+        for block in read_blocks(io.BytesIO(data)):
+            item = getattr(block, "item", None)
+            value = getattr(item, "value", None) if item is not None else None
+            if isinstance(value, GlyphRange) and value.text:
+                color = getattr(value, "color", None)
+                highlights.append(
+                    {
+                        "text": value.text,
+                        "color": color.name.lower() if color is not None else None,
+                    }
+                )
+        return highlights
+    except ImportError:
+        return []
+    except Exception:
+        # Older/unknown .rm format - no highlights extractable
+        return []
+
+
+def extract_highlights_from_document_zip(zip_path: Path) -> List[Dict[str, Any]]:
+    """
+    Extract structured smart highlights from a full document zip.
+
+    Returns ``[{"page_number": Optional[int], "text": str, "color": str}]``
+    ordered by page. Used by transports that can't fetch per-page blobs
+    selectively (SSH/USB download the whole bundle anyway).
+    """
+    highlights: List[Dict[str, Any]] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmpdir_path)
+
+        page_order: List[str] = []
+        for content_file in tmpdir_path.glob("*.content"):
+            try:
+                data = json.loads(content_file.read_text())
+                if "cPages" in data and "pages" in data["cPages"]:
+                    page_order = [p["id"] for p in data["cPages"]["pages"]]
+                elif "pages" in data and isinstance(data["pages"], list):
+                    page_order = data["pages"]
+            except Exception:
+                pass
+            break
+
+        rm_files = sorted(
+            tmpdir_path.glob("**/*.rm"),
+            key=lambda f: page_order.index(f.stem) if f.stem in page_order else len(page_order),
+        )
+        for rm_file in rm_files:
+            page_num = page_order.index(rm_file.stem) + 1 if rm_file.stem in page_order else None
+            try:
+                for h in extract_highlights_from_rm_bytes(rm_file.read_bytes()):
+                    highlights.append(
+                        {"page_number": page_num, "text": h["text"], "color": h["color"]}
+                    )
+            except Exception:
+                pass
+    return highlights
+
+
 def _parse_hex_color(hex_color: str) -> tuple:
     """Parse a hex color string to RGBA tuple.
 
@@ -1775,6 +1852,19 @@ def extract_text_from_document_zip(
                             )
             except Exception:
                 # Malformed JSON - skip this file
+                pass
+
+        # Extract smart highlights stored inside the v6 .rm page files (current
+        # firmware writes GlyphRange blocks instead of sidecar JSON).
+        for rm_file in rm_files:
+            page_id = rm_file.stem
+            page_num = page_order.index(page_id) + 1 if page_id in page_order else None
+            try:
+                for h in extract_highlights_from_rm_bytes(rm_file.read_bytes()):
+                    text = h["text"]
+                    result["highlights"].append(f"[Page {page_num}] {text}" if page_num else text)
+            except Exception:
+                # Unreadable .rm file - skip
                 pass
 
         # OCR for handwritten content (optional)

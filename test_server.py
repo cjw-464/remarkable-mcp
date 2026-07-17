@@ -103,6 +103,7 @@ class TestMCPServerInitialization:
             "remarkable_status",
             "remarkable_image",
             "remarkable_canvas",
+            "remarkable_highlights",
         ]
 
         for tool_name in expected_tools:
@@ -110,13 +111,13 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 6 read tools + always-on canvas + 5 write tools.
+        """Cloud default: 7 read tools + always-on canvas + 5 write tools.
 
         ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default (cloud) surface is 12 tools, not 13.
+        the default (cloud) surface is 13 tools, not 14.
         """
         tools = await mcp.list_tools()
-        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
+        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1189,7 +1190,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 12
+        assert len(tools) == 13
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2657,12 +2658,12 @@ class TestWriteTools:
         ]
 
         for tool_name in write_tool_names:
-            assert tool_name in tool_names, (
-                f"Write tool {tool_name} should be registered by default"
-            )
-        assert "remarkable_author" not in tool_names, (
-            "remarkable_author is SSH-only and must be hidden in cloud mode"
-        )
+            assert (
+                tool_name in tool_names
+            ), f"Write tool {tool_name} should be registered by default"
+        assert (
+            "remarkable_author" not in tool_names
+        ), "remarkable_author is SSH-only and must be hidden in cloud mode"
 
     @pytest.mark.asyncio
     async def test_write_tools_registered_when_enabled(self):
@@ -5163,3 +5164,178 @@ class TestUploadDocumentTags:
         client.upload_document(b"%PDF-1.4 fake", "Multi", "pdf", tags=["briefing", "review"])
 
         assert [t["name"] for t in captured["content"]["tags"]] == ["briefing", "review"]
+
+
+class TestGlyphHighlights:
+    """Smart highlights stored as GlyphRange blocks inside v6 .rm files."""
+
+    @staticmethod
+    def _glyph_rm_bytes(text, color=None):
+        import io as _io
+
+        from rmscene import write_blocks
+        from rmscene.scene_items import GlyphRange, PenColor, Rectangle
+        from rmscene.scene_stream import CrdtSequenceItem, SceneGlyphItemBlock
+        from rmscene.tagged_block_common import CrdtId
+
+        block = SceneGlyphItemBlock(
+            parent_id=CrdtId(0, 11),
+            item=CrdtSequenceItem(
+                item_id=CrdtId(1, 20),
+                left_id=CrdtId(0, 0),
+                right_id=CrdtId(0, 0),
+                deleted_length=0,
+                value=GlyphRange(
+                    start=0,
+                    length=len(text),
+                    text=text,
+                    color=color or PenColor.HIGHLIGHT,
+                    rectangles=[Rectangle(0, 0, 10, 10)],
+                ),
+            ),
+        )
+        buf = _io.BytesIO()
+        write_blocks(buf, [block], options={"version": "3.1"})
+        return buf.getvalue()
+
+    def test_extract_highlights_from_rm_bytes(self):
+        from remarkable_mcp.extract import extract_highlights_from_rm_bytes
+
+        data = self._glyph_rm_bytes("Creativity is currency")
+        assert extract_highlights_from_rm_bytes(data) == [
+            {"text": "Creativity is currency", "color": "highlight"}
+        ]
+
+    def test_extract_highlights_from_rm_bytes_handles_garbage(self):
+        from remarkable_mcp.extract import extract_highlights_from_rm_bytes
+
+        assert extract_highlights_from_rm_bytes(b"not an rm file") == []
+
+    def test_document_zip_extraction_includes_glyph_highlights(self):
+        """content_type='annotations' path: glyph highlights land in result['highlights']."""
+        import tempfile as _tempfile
+        import zipfile as _zip
+        from pathlib import Path as _Path
+
+        from remarkable_mcp.extract import extract_text_from_document_zip
+
+        doc_id = "doc-glyph-test"
+        with _tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
+            zpath = _Path(ztmp.name)
+        with _zip.ZipFile(zpath, "w") as zf:
+            zf.writestr(
+                f"{doc_id}.content",
+                json.dumps({"pages": ["page-1", "page-2"], "fileType": "epub"}),
+            )
+            zf.writestr(f"{doc_id}.metadata", json.dumps({"visibleName": "test"}))
+            zf.writestr(f"{doc_id}/page-2.rm", self._glyph_rm_bytes("Highlighted passage"))
+        try:
+            result = extract_text_from_document_zip(zpath)
+            assert result["highlights"] == ["[Page 2] Highlighted passage"]
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def test_extract_highlights_from_document_zip_structured(self):
+        import tempfile as _tempfile
+        import zipfile as _zip
+        from pathlib import Path as _Path
+
+        from remarkable_mcp.extract import extract_highlights_from_document_zip
+
+        doc_id = "doc-glyph-test"
+        with _tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
+            zpath = _Path(ztmp.name)
+        with _zip.ZipFile(zpath, "w") as zf:
+            zf.writestr(f"{doc_id}.content", json.dumps({"pages": ["page-1", "page-2"]}))
+            zf.writestr(f"{doc_id}/page-2.rm", self._glyph_rm_bytes("Highlighted passage"))
+        try:
+            result = extract_highlights_from_document_zip(zpath)
+            assert result == [
+                {"page_number": 2, "text": "Highlighted passage", "color": "highlight"}
+            ]
+        finally:
+            zpath.unlink(missing_ok=True)
+
+    def _mock_doc(self, *, files, annotated_pages, last_opened_page):
+        doc = Mock()
+        doc.VissibleName = "Obviously Awesome"
+        doc.ID = "doc-1"
+        doc.Parent = ""
+        doc.is_folder = False
+        doc.ModifiedClient = None
+        doc.files = files
+        doc.annotated_pages = annotated_pages
+        doc.last_opened_page = last_opened_page
+        doc.tags = []
+        doc.page_tags = []
+        return doc
+
+    @pytest.mark.asyncio
+    async def test_highlights_tool_cloud_path(self):
+        """Cloud transport fetches only per-page .rm blobs and returns structured JSON."""
+        rm_bytes = self._glyph_rm_bytes("Highlighted passage")
+        mock_doc = self._mock_doc(
+            files=[{"id": "doc-1/page-uuid.rm"}, {"id": "doc-1.content"}],
+            annotated_pages=[16],
+            last_opened_page=16,
+        )
+        mock_client = Mock()
+        mock_client.get_meta_items.return_value = [mock_doc]
+        mock_client.download_page_annotations.return_value = {16: rm_bytes}
+
+        with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
+            result = await mcp.call_tool("remarkable_highlights", {"document": "Obviously Awesome"})
+            data = json.loads(result[0][0].text)
+
+        assert data["count"] == 1
+        assert data["highlights"] == [
+            {"page_number": 16, "text": "Highlighted passage", "color": "highlight"}
+        ]
+        assert data["has_annotations"] is True
+        assert data["annotated_pages"] == [16]
+        assert data["last_opened_page"] == 16
+
+    @pytest.mark.asyncio
+    async def test_highlights_tool_zero_ink_fast_path(self):
+        """A book with no .rm blobs answers count: 0 without any download."""
+        mock_doc = self._mock_doc(
+            files=[{"id": "doc-1.content"}, {"id": "doc-1.epub"}],
+            annotated_pages=[],
+            last_opened_page=3,
+        )
+        mock_client = Mock()
+        mock_client.get_meta_items.return_value = [mock_doc]
+
+        with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
+            result = await mcp.call_tool("remarkable_highlights", {"document": "Obviously Awesome"})
+            data = json.loads(result[0][0].text)
+
+        assert data["count"] == 0
+        assert data["highlights"] == []
+        assert data["has_annotations"] is False
+        mock_client.download_page_annotations.assert_not_called()
+        mock_client.download.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_browse_includes_annotation_metadata(self):
+        """Browse surfaces has_annotations / annotated_pages / last_opened_page per doc."""
+        mock_doc = self._mock_doc(files=[], annotated_pages=[2, 16], last_opened_page=16)
+        mock_client = Mock()
+        mock_client.get_meta_items.return_value = [mock_doc]
+
+        with patch("remarkable_mcp.tools.get_rmapi", return_value=mock_client):
+            with patch("remarkable_mcp.tools._is_cloud_archived", return_value=False):
+                result = await mcp.call_tool("remarkable_browse", {"path": "/"})
+                data = json.loads(result[0][0].text)
+
+        doc_info = data["documents"][0]
+        assert doc_info["has_annotations"] is True
+        assert doc_info["annotated_pages"] == [2, 16]
+        assert doc_info["last_opened_page"] == 16
+
+    def test_document_annotation_fields_default(self):
+        from remarkable_mcp.sync import Document
+
+        doc = Document(id="i", hash="h", name="n", doc_type="DocumentType")
+        assert doc.annotated_pages == []
+        assert doc.last_opened_page is None

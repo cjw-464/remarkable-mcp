@@ -7,6 +7,7 @@ This document provides detailed documentation for all MCP tools provided by rema
 | Tool | Purpose |
 |------|---------|
 | [`remarkable_read`](#remarkable_read) | Read and search document content |
+| [`remarkable_highlights`](#remarkable_highlights) | Get smart highlights with page numbers |
 | [`remarkable_browse`](#remarkable_browse) | Navigate folders and find documents |
 | [`remarkable_search`](#remarkable_search) | Search across multiple documents |
 | [`remarkable_recent`](#remarkable_recent) | Get recently modified documents |
@@ -106,6 +107,53 @@ remarkable_read("/Work/Projects/Q4 Planning")
 - **Notebooks**: Pages correspond to actual notebook pages (especially useful with OCR)
 
 When `more: true`, use the `page` parameter to continue reading.
+
+---
+
+## remarkable_highlights
+
+**Get the smart highlights from an EPUB/PDF document, with page numbers.**
+
+Highlighting text with the highlighter tool while reading stores the extracted
+passage in the page's `.rm` data (as a `GlyphRange` block on current firmware,
+or a `.highlights` sidecar JSON on older firmware). This tool returns that
+stored text directly - no OCR, no page rendering.
+
+```python
+remarkable_highlights("/Books/Obviously Awesome")
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `document` | string | required | Document name or path |
+
+**Returns:**
+
+```json
+{
+  "document": "Obviously Awesome",
+  "path": "/Books/Obviously Awesome",
+  "highlights": [
+    {"page_number": 16, "text": "Positioning is the act of...", "color": "highlight"}
+  ],
+  "count": 1,
+  "has_annotations": true,
+  "annotated_pages": [16],
+  "last_opened_page": 16
+}
+```
+
+A document with no highlights returns `count: 0` - that's a clean answer, not
+an error, and it's answered from the blob index without downloading content.
+`page_number` matches the `page=` parameter of `remarkable_read` /
+`remarkable_image`. In cloud mode only the small per-page `.rm` blobs are
+fetched (never the source EPUB/PDF).
+
+The same annotation metadata (`has_annotations`, `annotated_pages`,
+`last_opened_page`) also appears on documents in `remarkable_browse` and
+`remarkable_read` responses, resolved at listing time with no downloads.
 
 ---
 

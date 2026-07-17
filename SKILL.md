@@ -83,6 +83,7 @@ For handwriting OCR, add a Google Vision API key:
 | Tool | Purpose |
 |------|---------|
 | `remarkable_read` | Read document content with text extraction, pagination, grep |
+| `remarkable_highlights` | Get smart highlights from an EPUB/PDF with page numbers |
 | `remarkable_browse` | Browse folders, search by name, filter by tags |
 | `remarkable_search` | Multi-document content search with OCR |
 | `remarkable_recent` | List recently modified documents |

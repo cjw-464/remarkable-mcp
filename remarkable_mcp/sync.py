@@ -342,6 +342,12 @@ class Document:
     # 1-based position in the document's visible page order, omitted when the
     # tagged page can't be resolved (e.g. page since deleted).
     page_tags: List[Dict[str, Any]] = field(default_factory=list)
+    # 1-based page numbers that carry ink (a .rm stroke blob exists for the
+    # page). Derived from the blob index at metadata-load time - no downloads.
+    annotated_pages: List[int] = field(default_factory=list)
+    # 1-based reading position from .metadata's lastOpenedPage (0-based on
+    # disk). None for folders or documents never opened.
+    last_opened_page: Optional[int] = None
 
     @property
     def is_folder(self) -> bool:
@@ -660,6 +666,25 @@ class RemarkableClient:
                 tag_entry["page"] = page_order.index(page_id) + 1
             page_tags.append(tag_entry)
 
+        # Pages that carry ink: every page with a .rm stroke blob in the index,
+        # resolved to a 1-based page number via the visible page order. Blob ids
+        # look like "{docId}/{pageId}.rm".
+        annotated_pages: List[int] = []
+        for blob_entry in blob_entries:
+            entry_id = blob_entry["id"]
+            if entry_id.endswith(".rm"):
+                page_id = entry_id.rsplit("/", 1)[-1][: -len(".rm")]
+                if page_id in page_order:
+                    annotated_pages.append(page_order.index(page_id) + 1)
+        annotated_pages.sort()
+
+        # Reading position: .metadata stores lastOpenedPage 0-based; expose it
+        # 1-based to match the page= parameter of the read/image tools.
+        last_opened_page = None
+        raw_last_opened = metadata.get("lastOpenedPage")
+        if isinstance(raw_last_opened, int) and raw_last_opened >= 0:
+            last_opened_page = raw_last_opened + 1
+
         # Parse last modified timestamp
         last_modified = None
         if "lastModified" in metadata:
@@ -682,6 +707,8 @@ class RemarkableClient:
             files=files,
             tags=tags,
             page_tags=page_tags,
+            annotated_pages=annotated_pages,
+            last_opened_page=last_opened_page,
         )
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
@@ -804,6 +831,48 @@ class RemarkableClient:
                     logger.debug(f"Failed to download {entry['id']} for {doc.id}: {e}")
                     return None
         return None
+
+    def download_page_annotations(self, doc: Document) -> Dict[int, bytes]:
+        """Download only the per-page ``.rm`` stroke blobs for a document.
+
+        Returns ``{page_number: rm_bytes}`` with 1-based page numbers resolved
+        via the document's visible page order (blobs whose page can't be
+        resolved are skipped). Skips the multi-MB source PDF/EPUB blobs
+        entirely, so highlight extraction stays cheap. Returns ``{}`` when the
+        document carries no ink.
+        """
+        rm_entries: List[tuple] = []
+        content_entry: Optional[Dict[str, Any]] = None
+        for entry in self._ensure_files(doc):
+            entry_id = entry.get("id", "")
+            if entry_id.endswith(".rm"):
+                page_id = entry_id.rsplit("/", 1)[-1][: -len(".rm")]
+                rm_entries.append((page_id, entry))
+            elif entry_id.endswith(".content"):
+                content_entry = entry
+
+        if not rm_entries:
+            return {}
+
+        page_order: List[str] = []
+        if content_entry is not None:
+            try:
+                content = json.loads(
+                    self._get_file(content_entry["hash"], content_entry["id"]).decode("utf-8")
+                )
+                page_order = self._page_order_from_content(content)
+            except Exception as e:
+                logger.debug(f"Could not read page order for {doc.id}: {e}")
+
+        result: Dict[int, bytes] = {}
+        for page_id, entry in rm_entries:
+            if page_id not in page_order:
+                continue
+            try:
+                result[page_order.index(page_id) + 1] = self._get_file(entry["hash"], entry["id"])
+            except Exception as e:
+                logger.debug(f"Failed to download {entry['id']} for {doc.id}: {e}")
+        return result
 
     def get_all_file_types(self) -> Dict[str, Optional[str]]:
         """Return a ``{doc_id: file_type}`` map for every loaded document.

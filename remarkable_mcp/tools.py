@@ -35,6 +35,8 @@ from remarkable_mcp.api import (
 from remarkable_mcp.concurrency import run_blocking
 from remarkable_mcp.extract import (
     cache_page_ocr,
+    extract_highlights_from_document_zip,
+    extract_highlights_from_rm_bytes,
     extract_text_from_document_zip,
     extract_text_from_epub,
     extract_text_from_pdf,
@@ -156,6 +158,11 @@ IMAGE_ANNOTATIONS = ToolAnnotations(
     **_BASE_ANNOTATIONS,
 )
 
+HIGHLIGHTS_ANNOTATIONS = ToolAnnotations(
+    title="Get reMarkable Document Highlights",
+    **_BASE_ANNOTATIONS,
+)
+
 # Default page size for pagination (characters) - used for PDFs/EPUBs
 DEFAULT_PAGE_SIZE = 8000
 
@@ -200,6 +207,25 @@ def _item_tag_fields(item) -> Dict[str, Any]:
     raw_page_tags = getattr(item, "page_tags", None)
     if isinstance(raw_page_tags, list) and raw_page_tags:
         fields["page_tags"] = raw_page_tags
+    return fields
+
+
+def _item_annotation_fields(item) -> Dict[str, Any]:
+    """Annotation metadata resolved at listing time (no content downloads).
+
+    ``annotated_pages``/``last_opened_page`` are populated by the cloud
+    transport from the blob index and .metadata; transports that don't provide
+    them contribute no fields.
+    """
+    fields: Dict[str, Any] = {}
+    annotated = getattr(item, "annotated_pages", None)
+    if isinstance(annotated, list):
+        fields["has_annotations"] = bool(annotated)
+        if annotated:
+            fields["annotated_pages"] = annotated
+    last_opened = getattr(item, "last_opened_page", None)
+    if isinstance(last_opened, int):
+        fields["last_opened_page"] = last_opened
     return fields
 
 
@@ -648,6 +674,7 @@ async def remarkable_read(
                 ),
             }
             result.update(_item_tag_fields(target_doc))
+            result.update(_item_annotation_fields(target_doc))
 
             # Add OCR backend info if OCR was used
             if include_ocr and ocr_backend_used:
@@ -752,6 +779,7 @@ async def remarkable_read(
                 ),
             }
             result.update(_item_tag_fields(target_doc))
+            result.update(_item_annotation_fields(target_doc))
             hint = (
                 f"Document '{target_doc.VissibleName}' has no extractable text content. "
                 "This may be a handwritten notebook - try include_ocr=True for OCR extraction."
@@ -793,6 +821,7 @@ async def remarkable_read(
         page_tags = getattr(target_doc, "page_tags", None)
         if page_tags:
             result["page_tags"] = page_tags
+        result.update(_item_annotation_fields(target_doc))
 
         if has_more:
             result["next_page"] = page + 1
@@ -831,6 +860,126 @@ async def remarkable_read(
     except Exception as e:
         return make_error(
             error_type="read_failed",
+            message=str(e),
+            suggestion="Check remarkable_status() to verify your connection.",
+        )
+
+
+@mcp.tool(annotations=HIGHLIGHTS_ANNOTATIONS)
+async def remarkable_highlights(document: str) -> str:
+    """
+    <usecase>Get the smart highlights from an EPUB/PDF document, with page
+    numbers - the passages highlighted with the highlighter tool while
+    reading.</usecase>
+    <instructions>
+    Returns the extracted highlight text straight from the document's stored
+    annotation data - no OCR, no page rendering. A document with no highlights
+    returns count: 0 (that's a clean answer, not an error).
+
+    Each highlight carries:
+    - page_number: 1-based page the highlight lives on (matches the page=
+      parameter of remarkable_read/remarkable_image)
+    - text: the highlighted passage as the device extracted it
+    - color: highlight color name
+
+    The response also includes last_opened_page (reading position) and
+    annotated_pages so a sweep can scope follow-up work.
+    </instructions>
+    <parameters>
+    - document: Document name or path (use remarkable_browse to find documents)
+    </parameters>
+    <examples>
+    - remarkable_highlights("/Books/Obviously Awesome")
+    - remarkable_highlights("Some Article")
+    </examples>
+    """
+    try:
+        client = get_rmapi()
+        collection = await run_blocking(client.get_meta_items)
+        items_by_id = get_items_by_id(collection)
+
+        root = _get_root_path()
+        actual_document = _resolve_root_path(document) if document.startswith("/") else document
+
+        documents = [item for item in collection if not item.is_folder]
+        target_doc = None
+        document_lower = actual_document.lower().strip("/")
+
+        for doc in documents:
+            doc_path = get_item_path(doc, items_by_id)
+            if not _is_within_root(doc_path, root):
+                continue
+            if doc.VissibleName.lower() == document_lower:
+                target_doc = doc
+                break
+            if doc_path.lower().strip("/") == document_lower:
+                target_doc = doc
+                break
+
+        if not target_doc:
+            filtered_docs = [
+                doc for doc in documents if _is_within_root(get_item_path(doc, items_by_id), root)
+            ]
+            similar = find_similar_documents(document, filtered_docs)
+            return make_error(
+                error_type="document_not_found",
+                message=f"Document not found: '{document}'",
+                suggestion="Try remarkable_browse(query='...') to find the document.",
+                did_you_mean=similar if similar else None,
+            )
+
+        doc_path = get_item_path(target_doc, items_by_id)
+
+        highlights: List[Dict[str, Any]] = []
+
+        # Fast path: the cloud blob index already says whether any page carries
+        # ink. No .rm blobs at all means no highlights - answer without
+        # downloading anything.
+        files = getattr(target_doc, "files", None)
+        has_ink = (
+            any(e.get("id", "").endswith(".rm") for e in files) if isinstance(files, list) else None
+        )
+
+        if has_ink is not False:
+            if hasattr(client, "download_page_annotations"):
+                # Cloud: fetch only the small per-page .rm blobs.
+                pages = await run_blocking(client.download_page_annotations, target_doc)
+                for page_num in sorted(pages):
+                    for h in extract_highlights_from_rm_bytes(pages[page_num]):
+                        highlights.append(
+                            {"page_number": page_num, "text": h["text"], "color": h["color"]}
+                        )
+            else:
+                # SSH/USB: download the bundle and extract from the zip.
+                raw_doc = await run_blocking(client.download, target_doc)
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                    tmp.write(raw_doc)
+                    tmp_path = Path(tmp.name)
+                try:
+                    highlights = await run_blocking(extract_highlights_from_document_zip, tmp_path)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+
+        result: Dict[str, Any] = {
+            "document": target_doc.VissibleName,
+            "path": _apply_root_filter(doc_path),
+            "highlights": highlights,
+            "count": len(highlights),
+        }
+        result.update(_item_annotation_fields(target_doc))
+
+        if highlights:
+            hint = (
+                f"{len(highlights)} highlight(s). Page numbers match "
+                f"remarkable_read('{target_doc.VissibleName}', page=N)."
+            )
+        else:
+            hint = "No highlights in this document."
+        return make_response(result, hint)
+
+    except Exception as e:
+        return make_error(
+            error_type="highlights_failed",
             message=str(e),
             suggestion="Check remarkable_status() to verify your connection.",
         )
@@ -910,6 +1059,8 @@ async def remarkable_browse(
                     }
                     # Add tags if present (doc-level and page-level, distinct)
                     match_info.update(_item_tag_fields(item))
+                    if not item.is_folder:
+                        match_info.update(_item_annotation_fields(item))
                     matches.append(match_info)
 
             matches.sort(key=lambda x: x["name"])
@@ -1045,6 +1196,7 @@ async def remarkable_browse(
                 }
                 # Add tags if present (doc-level and page-level, distinct)
                 doc_info.update(_item_tag_fields(item))
+                doc_info.update(_item_annotation_fields(item))
                 documents.append(doc_info)
 
         result = {"mode": "browse", "path": path, "folders": folders, "documents": documents}

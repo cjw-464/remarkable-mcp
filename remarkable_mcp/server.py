@@ -85,6 +85,7 @@ def _build_instructions() -> str:
 
 - `remarkable_browse(path, query)` - Browse folders or search for documents
 - `remarkable_read(document, content_type, page, grep)` - Read document content with pagination
+- `remarkable_highlights(document)` - Get smart highlights from an EPUB/PDF with page numbers
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
